@@ -1,17 +1,19 @@
 # VTuber Python Tracker (MediaPipe to VMC)
 
-Aplikasi Python ini mengimplementasikan sistem *Motion Capture* menggunakan webcam standar. Program ini memanfaatkan **MediaPipe Holistic** untuk mendeteksi gerakan wajah, tangan, dan tubuh, lalu mengirimkan data tersebut melalui **VMC Protocol (OSC)**.
+Aplikasi Python ini mengimplementasikan sistem *Motion Capture* tubuh penuh (*Full Body*) menggunakan webcam standar. Program ini memanfaatkan **MediaPipe Holistic** untuk mendeteksi gerakan wajah, mata, tangan, tubuh, hingga kaki, lalu mengirimkan data tersebut melalui **VMC Protocol (OSC)**.
 
 Aplikasi ini dirancang untuk bekerja dengan aplikasi VTuber populer yang mendukung penerimaan data VMC/OSC, seperti **VSeeFace**, **Warudo**, atau project Unity kustom.
 
-## Fitur
+## Fitur Utama
 
-  * **Face Tracking:** Melacak rotasi kepala (Pitch, Yaw, Roll), posisi mata (Iris Tracking), kedipan mata, dan pergerakan mulut.
+  * **Face Tracking:** Melacak rotasi kepala (Pitch, Yaw, Roll), posisi iris mata (Iris Tracking), kedipan mata, dan pergerakan mulut.
   * **Upper Body Tracking:** Melacak rotasi tulang belakang (Spine), bahu, lengan atas, dan lengan bawah.
-  * **Finger Tracking:** Melacak pergerakan dan lekukan 5 jari pada kedua tangan.
-  * **Smoothing System:** Mengimplementasikan algoritma *One Euro Filter* untuk mengurangi *jitter* (getaran) dan memperhalus gerakan tracking.
+  * **Leg Tracking (Baru):** Melacak pergerakan kaki (Paha dan Betis/Upper & Lower Leg) menggunakan deteksi pose MediaPipe.
+  * **Finger Tracking:** Melacak pergerakan dan lekukan 5 jari pada kedua tangan secara detail.
+  * **Smoothing System (One Euro Filter):** Mengimplementasikan algoritma *One Euro Filter* yang telah dikalibrasi ulang untuk mengurangi *jitter* dan membuat gerakan lebih natural.
+  * **Visualisasi Tesselation:** Menampilkan jaring-jaring wajah (*Face Mesh Tesselation*) dan *skeleton* tubuh pada jendela preview.
+  * **Auto-Fix Protobuf:** Menyertakan *shim* kompatibilitas bawaan untuk mencegah error versi `google.protobuf`.
   * **VMC Protocol Support:** Mengirim data tulang (Bone) dan Blendshape via OSC ke port default (39539).
-  * **Visualisasi:** Menampilkan *wireframe* deteksi pada jendela preview.
 
 ## Persyaratan Sistem
 
@@ -20,97 +22,87 @@ Aplikasi ini dirancang untuk bekerja dengan aplikasi VTuber populer yang menduku
 
 ### Pustaka Python (Dependencies)
 
-  * `opencv-python`
-  * `mediapipe`
-  * `numpy`
-  * `python-osc`
-
-## Instalasi
-
-1.  **Clone repository ini:**
-
-    ```bash
-    git clone https://github.com/username/repository-anda.git
-    cd repository-anda
-    ```
-
-2.  **Instal pustaka yang dibutuhkan:**
-    Gunakan pip untuk menginstal dependensi:
-
-    ```bash
-    pip install opencv-python mediapipe numpy python-osc
-    ```
-
-## Penggunaan
-
-### 1\. Menjalankan Tracker
-
-Jalankan script utama melalui terminal:
+Gunakan `pip` untuk menginstal pustaka yang diperlukan:
 
 ```bash
-python main.py
+pip install opencv-python mediapipe numpy python-osc
 ```
 
-Sebuah jendela akan muncul menampilkan umpan kamera dengan visualisasi tracking. Tekan tombol `q` pada keyboard saat jendela aktif untuk menghentikan program.
+## Instalasi & Penggunaan
 
-### 2\. Integrasi dengan VSeeFace (Contoh)
+1.  **Clone atau Download repository ini.**
 
-Secara default, script ini mengirim data ke `127.0.0.1` pada port `39539`.
+2.  **Jalankan Script:**
 
-1.  Buka VSeeFace.
-2.  Masuk ke **Settings** \> **General Settings**.
-3.  Pada bagian **OSC/VMC receiver**, centang opsi **Enable**.
-4.  Pastikan port diatur ke **39539**.
-5.  Avatar akan mulai bergerak mengikuti gerakan Anda.
+    Buka terminal di folder project dan jalankan:
 
-**Catatan:** Disarankan untuk tidak menggunakan kamera yang sama pada input kamera VSeeFace saat script ini berjalan, karena dapat menyebabkan konflik akses perangkat keras.
+    ```bash
+    python main.py
+    ```
 
-## Konfigurasi
+    *Jika Anda menggunakan Virtual Environment (venv), pastikan sudah diaktifkan.*
 
-Anda dapat mengubah parameter konfigurasi langsung di bagian atas file `main.py`:
+3.  **Integrasi dengan Aplikasi VTuber (Contoh: VSeeFace)**
 
-### Koneksi OSC
+      * Buka VSeeFace.
+      * Masuk ke **Settings** \> **General Settings**.
+      * Pada bagian **OSC/VMC receiver**, centang **Enable**.
+      * Pastikan port diatur ke **39539**.
+      * Avatar akan mulai bergerak mengikuti gerakan tubuh Anda.
+
+## Konfigurasi (Tweak)
+
+Anda dapat mengubah parameter konfigurasi langsung di bagian atas file `main.py` untuk menyesuaikan sensitivitas:
+
+### Koneksi OSC & Kamera
 
 ```python
-OSC_IP = "127.0.0.1"    # Alamat IP tujuan (Localhost)
+OSC_IP = "127.0.0.1"    # IP Tujuan
 OSC_PORT = 39539        # Port VMC
-```
-
-### Kamera
-
-```python
-WEBCAM_ID = 0           # Index kamera (0 biasanya kamera default)
+WEBCAM_ID = 0           # ID Kamera
 TARGET_FPS = 30         # Target FPS
 ```
 
-### Kalibrasi & Sensitivitas
+### Smoothing & Sensitivitas
 
-  * **FINGER\_SENSITIVITY:** Mengatur responsivitas lekukan jari.
-  * **EAR\_THRESH:** Mengatur ambang batas deteksi kedipan mata (Close/Open).
-  * **ARM\_INVERT:** Mengatur inversi sumbu rotasi lengan jika gerakan terbalik di aplikasi target.
-
-### Smoothing (One Euro Filter)
-
-Parameter ini mengatur keseimbangan antara *smoothness* (kehalusan) dan *latency* (responsivitas):
-
-  * **MIN\_CUTOFF:** Nilai lebih rendah meningkatkan kehalusan namun menambah latensi.
-  * **BETA:** Nilai lebih tinggi mengurangi latensi pada gerakan cepat.
-
-<!-- end list -->
+Kode ini menggunakan parameter yang telah disesuaikan untuk gerakan yang lebih stabil:
 
 ```python
-HEAD_MIN_CUTOFF = 0.05
-HEAD_BETA       = 0.5
+HEAD_MIN_CUTOFF = 0.03  # Semakin kecil = semakin smooth (kurang jitter) tapi sedikit delay
+HEAD_BETA       = 1.5   # Responsivitas gerakan cepat
+FINGER_MIN_CUTOFF = 0.8 # Smoothing tinggi untuk jari agar tidak "twitchy"
+```
+
+### Kalibrasi Gerakan
+
+```python
+ARM_GAIN_XY, ARM_GAIN_Z = 0.8, 0.35  # Mengatur seberapa lebar rentang gerak lengan
+NECK_RATIO = 0.4                     # Rasio pergerakan leher terhadap kepala
+PITCH_CORRECTION_FACTOR = 0.01       # Koreksi posisi mata saat menunduk/mendongak
 ```
 
 ## Pemecahan Masalah (Troubleshooting)
 
-**Error: AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'**
-Ini adalah masalah kompatibilitas umum antara versi `protobuf` dan `mediapipe`. Solusinya adalah menurunkan versi protobuf:
+**1. Error: "The OpenCV build in use does not include GUI support"**
+Jika muncul pesan ini, artinya Python yang Anda gunakan menginstal versi OpenCV "headless" (tanpa fitur tampilan jendela).
+
+  * **Solusi:** Pastikan Anda menjalankan script menggunakan python di dalam virtual environment (`.venv`) yang memiliki paket `opencv-python` lengkap, bukan `opencv-python-headless`.
+
+**2. Error Google Protobuf / GetMessageClass**
+Script ini sudah memiliki kode *shim* otomatis di baris awal untuk mengatasi masalah ini. Namun, jika masih bermasalah, coba instal versi protobuf spesifik:
 
 ```bash
 pip install protobuf==3.20.*
 ```
 
-**Kamera tidak terbuka**
-Pastikan `WEBCAM_ID` sesuai dengan perangkat Anda dan tidak ada aplikasi lain yang sedang menggunakan kamera tersebut.
+**3. Gerakan Lambat / FPS Rendah**
+
+  * Pastikan pencahayaan ruangan cukup terang.
+  * Coba turunkan resolusi kamera di kode (`cap.set`) jika spesifikasi PC terbatas.
+
+**4. Kamera tidak terbuka**
+Pastikan tidak ada aplikasi lain (seperti Zoom/Discord atau VSeeFace bagian "Camera") yang sedang menggunakan webcam yang sama saat script ini dijalankan.
+
+## Tombol Kontrol
+
+  * Tekan **`q`** pada keyboard saat jendela preview aktif untuk menutup aplikasi.
