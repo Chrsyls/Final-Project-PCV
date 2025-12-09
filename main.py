@@ -1,4 +1,16 @@
 import cv2
+import sys
+# Compatibility shim: ensure google.protobuf.message_factory provides
+# a GetMessageClass function expected by MediaPipe across protobuf versions.
+try:
+    from google.protobuf import message_factory as _mf
+    if not hasattr(_mf, 'GetMessageClass'):
+        def GetMessageClass(descriptor):
+            return _mf.MessageFactory().GetPrototype(descriptor)
+        _mf.GetMessageClass = GetMessageClass
+except Exception:
+    # If anything fails here, we'll let the normal import error surface later.
+    pass
 import mediapipe as mp
 import numpy as np
 from pythonosc import udp_client
@@ -12,18 +24,20 @@ WEBCAM_ID = 0
 TARGET_FPS = 30
 
 # --- KONFIGURASI SMOOTHING ---
-HEAD_MIN_CUTOFF = 0.05
-HEAD_BETA       = 0.5
-FINGER_MIN_CUTOFF = 0.5
-FINGER_BETA       = 1.0
+HEAD_MIN_CUTOFF = 0.03  # Slightly higher for more stable face (less responsive to noise)
+HEAD_BETA       = 1.5   # Stronger dampening for less exaggerated movement
+FINGER_MIN_CUTOFF = 0.8 # Higher = smoother, less twitchy fingers
+FINGER_BETA       = 1.2 # More dampening
+EYE_MIN_CUTOFF = 0.03   # Smoother eye tracking
+EYE_BETA = 1.0
 
 # --- DATA KALIBRASI ---
 ARM_INVERT_X, ARM_INVERT_Y, ARM_INVERT_Z = 1.0, 1.0, 1.0
-ARM_GAIN_XY, ARM_GAIN_Z = 1.2, 0.5
-FINGER_SENSITIVITY = 1.3
-NECK_RATIO = 0.5
-PITCH_CORRECTION_FACTOR = 0.015
-EYE_Y_OFFSET = 0.02
+ARM_GAIN_XY, ARM_GAIN_Z = 0.8, 0.35  # Reduced from 1.2, 0.5 = smaller arm movements
+FINGER_SENSITIVITY = 0.9  # Reduced from 1.3 = less dramatic finger curls
+NECK_RATIO = 0.4  # Reduced from 0.5 = less exaggerated neck tilt
+PITCH_CORRECTION_FACTOR = 0.01  # Reduced from 0.015 = subtler eye pitch adjustment
+EYE_Y_OFFSET = 0.015  # Reduced from 0.02
 EAR_THRESH_CLOSE, EAR_THRESH_OPEN = 0.15, 0.25
 
 # --- HELPER FUNCTIONS ---
@@ -151,11 +165,24 @@ filter_yaw   = OneEuroFilter(t_start, 0, min_cutoff=HEAD_MIN_CUTOFF, beta=HEAD_B
 filter_roll  = OneEuroFilter(t_start, 0, min_cutoff=HEAD_MIN_CUTOFF, beta=HEAD_BETA)
 filter_spine_roll = OneEuroFilter(t_start, 0, min_cutoff=HEAD_MIN_CUTOFF, beta=HEAD_BETA)
 filter_spine_yaw  = OneEuroFilter(t_start, 0, min_cutoff=HEAD_MIN_CUTOFF, beta=HEAD_BETA)
-filter_eye_x = OneEuroFilter(t_start, 0, min_cutoff=0.1, beta=0.5)
-filter_eye_y = OneEuroFilter(t_start, 0, min_cutoff=0.1, beta=0.5)
+filter_eye_x = OneEuroFilter(t_start, 0, min_cutoff=EYE_MIN_CUTOFF, beta=EYE_BETA)
+filter_eye_y = OneEuroFilter(t_start, 0, min_cutoff=EYE_MIN_CUTOFF, beta=EYE_BETA)
 
 filters_fingers_L = [OneEuroFilter(t_start, 0, min_cutoff=FINGER_MIN_CUTOFF, beta=FINGER_BETA) for _ in range(5)]
 filters_fingers_R = [OneEuroFilter(t_start, 0, min_cutoff=FINGER_MIN_CUTOFF, beta=FINGER_BETA) for _ in range(5)]
+
+# Per-bone quaternion filters to smooth bone rotations (qx,qy,qz,qw)
+bone_names = [
+    'LeftUpperArm','LeftLowerArm','RightUpperArm','RightLowerArm',
+    'LeftUpperLeg','LeftLowerLeg','RightUpperLeg','RightLowerLeg'
+]
+bone_quat_filters = {}
+for name in bone_names:
+    bone_quat_filters[name] = [OneEuroFilter(t_start, 0, min_cutoff=HEAD_MIN_CUTOFF, beta=HEAD_BETA) for _ in range(4)]
+
+# Quaternion filters for head and neck bones (extra smoothing to reduce face jitter)
+bone_quat_filters['Head'] = [OneEuroFilter(t_start, 0, min_cutoff=HEAD_MIN_CUTOFF, beta=HEAD_BETA) for _ in range(4)]
+bone_quat_filters['Neck'] = [OneEuroFilter(t_start, 0, min_cutoff=HEAD_MIN_CUTOFF, beta=HEAD_BETA) for _ in range(4)]
 
 # CONSTANTS
 model_points = np.array([(0.0, 0.0, 0.0), (0.0, -330.0, -65.0), (-225.0, 170.0, -135.0), (225.0, 170.0, -135.0), (-150.0, -150.0, -125.0), (150.0, -150.0, -125.0)], dtype=np.float64)
@@ -181,6 +208,19 @@ cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 360) 
 
 print("=== VTuber TESSELATION ONLY MODE: ON ===")
+
+# Quick runtime check: ensure the OpenCV build being used has GUI support.
+# If the user runs the system Python (which may have a headless OpenCV),
+# show a clear message and exit instead of raising the low-level cv2 error.
+try:
+    build_info = cv2.getBuildInformation()
+    if ('Win32 UI' not in build_info) and ('WIN32UI' not in build_info) and ('Cocoa' not in build_info and 'GTK' not in build_info):
+        print('\nERROR: The OpenCV build in use does not include GUI support (cv2.imshow).')
+        print('Run this script with the project virtualenv Python:')
+        print(r'"C:\Users\Lenovo\Downloads\PCV NEW\.venv\Scripts\python.exe" main.py')
+        sys.exit(1)
+except Exception:
+    pass
 
 while cap.isOpened():
     success, image = cap.read()
@@ -272,10 +312,21 @@ while cap.isOpened():
         mouth_dist = np.linalg.norm(np.array([fl.landmark[13].x*img_w, fl.landmark[13].y*img_h]) - np.array([fl.landmark[14].x*img_w, fl.landmark[14].y*img_h]))
         mouth_open = max(0.0, min(1.0, (mouth_dist - 5.0) * (1.0/(35.0))))
 
+        # Compute raw quaternions, then smooth per-component to reduce jitter
         nqx, nqy, nqz, nqw = euler_to_quaternion(math.radians(neck_pitch), math.radians(neck_yaw), math.radians(neck_roll))
-        client.send_message("/VMC/Ext/Bone/Pos", ["Neck", 0.0, 0.0, 0.0, float(nqx), float(nqy), float(nqz), float(nqw)])
+        bf_neck = bone_quat_filters['Neck']
+        nq_smooth = [bf_neck[i](curr_time, [nqx, nqy, nqz, nqw][i]) for i in range(4)]
+        norm = np.linalg.norm(nq_smooth)
+        if norm > 1e-6: nq_smooth = [x / norm for x in nq_smooth]
+        client.send_message("/VMC/Ext/Bone/Pos", ["Neck", 0.0, 0.0, 0.0, float(nq_smooth[0]), float(nq_smooth[1]), float(nq_smooth[2]), float(nq_smooth[3])])
+        
         hqx, hqy, hqz, hqw = euler_to_quaternion(math.radians(head_pitch), math.radians(head_yaw), math.radians(head_roll))
-        client.send_message("/VMC/Ext/Bone/Pos", ["Head", 0.0, 0.0, 0.0, float(hqx), float(hqy), float(hqz), float(hqw)])
+        bf_head = bone_quat_filters['Head']
+        hq_smooth = [bf_head[i](curr_time, [hqx, hqy, hqz, hqw][i]) for i in range(4)]
+        norm = np.linalg.norm(hq_smooth)
+        if norm > 1e-6: hq_smooth = [x / norm for x in hq_smooth]
+        client.send_message("/VMC/Ext/Bone/Pos", ["Head", 0.0, 0.0, 0.0, float(hq_smooth[0]), float(hq_smooth[1]), float(hq_smooth[2]), float(hq_smooth[3])])
+        
         client.send_message("/VMC/Ext/Root/Pos", ["Root", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
         client.send_message("/VMC/Ext/Blend/Val", ["Blink_L", float(blink_l_state)])
         client.send_message("/VMC/Ext/Blend/Val", ["Blink_R", float(blink_r_state)])
@@ -303,22 +354,79 @@ while cap.isOpened():
         client.send_message("/VMC/Ext/Bone/Pos", ["Spine", 0.0, 0.0, 0.0, float(sqx), float(sqy), float(sqz), float(sqw)])
 
         if lm[11].visibility > 0.5 and lm[13].visibility > 0.5:
-            start, end = to_unity_vec(get_vec(11)), to_unity_vec(get_vec(13))
-            q_lu = get_limb_rotation(start, end, [1.0, 0.0, 0.0])
-            client.send_message("/VMC/Ext/Bone/Pos", ["LeftUpperArm", 0.0, 0.0, 0.0, float(q_lu[0]), float(q_lu[1]), float(q_lu[2]), float(q_lu[3])])
-            if lm[15].visibility > 0.5:
-                start, end = to_unity_vec(get_vec(13)), to_unity_vec(get_vec(15))
-                q_ll = get_limb_rotation(start, end, [1.0, 0.0, 0.0])
-                client.send_message("/VMC/Ext/Bone/Pos", ["LeftLowerArm", 0.0, 0.0, 0.0, float(q_ll[0]), float(q_ll[1]), float(q_ll[2]), float(q_ll[3])])
+                start, end = to_unity_vec(get_vec(11)), to_unity_vec(get_vec(13))
+                q_lu = get_limb_rotation(start, end, [1.0, 0.0, 0.0])
+                # Smooth quaternion per-component
+                bf = bone_quat_filters['LeftUpperArm']
+                q_lu_s = [bf[i](curr_time, q_lu[i]) for i in range(4)]
+                # normalize
+                norm = np.linalg.norm(q_lu_s)
+                if norm > 1e-6: q_lu_s = [x / norm for x in q_lu_s]
+                client.send_message("/VMC/Ext/Bone/Pos", ["LeftUpperArm", 0.0, 0.0, 0.0, float(q_lu_s[0]), float(q_lu_s[1]), float(q_lu_s[2]), float(q_lu_s[3])])
+                if lm[15].visibility > 0.5:
+                    start, end = to_unity_vec(get_vec(13)), to_unity_vec(get_vec(15))
+                    q_ll = get_limb_rotation(start, end, [1.0, 0.0, 0.0])
+                    bf = bone_quat_filters['LeftLowerArm']
+                    q_ll_s = [bf[i](curr_time, q_ll[i]) for i in range(4)]
+                    norm = np.linalg.norm(q_ll_s)
+                    if norm > 1e-6: q_ll_s = [x / norm for x in q_ll_s]
+                    client.send_message("/VMC/Ext/Bone/Pos", ["LeftLowerArm", 0.0, 0.0, 0.0, float(q_ll_s[0]), float(q_ll_s[1]), float(q_ll_s[2]), float(q_ll_s[3])])
 
         if lm[12].visibility > 0.5 and lm[14].visibility > 0.5:
             start, end = to_unity_vec(get_vec(12)), to_unity_vec(get_vec(14))
             q_ru = get_limb_rotation(start, end, [-1.0, 0.0, 0.0])
-            client.send_message("/VMC/Ext/Bone/Pos", ["RightUpperArm", 0.0, 0.0, 0.0, float(q_ru[0]), float(q_ru[1]), float(q_ru[2]), float(q_ru[3])])
+            bf = bone_quat_filters['RightUpperArm']
+            q_ru_s = [bf[i](curr_time, q_ru[i]) for i in range(4)]
+            norm = np.linalg.norm(q_ru_s)
+            if norm > 1e-6: q_ru_s = [x / norm for x in q_ru_s]
+            client.send_message("/VMC/Ext/Bone/Pos", ["RightUpperArm", 0.0, 0.0, 0.0, float(q_ru_s[0]), float(q_ru_s[1]), float(q_ru_s[2]), float(q_ru_s[3])])
             if lm[16].visibility > 0.5:
                 start, end = to_unity_vec(get_vec(14)), to_unity_vec(get_vec(16))
                 q_rl = get_limb_rotation(start, end, [-1.0, 0.0, 0.0])
-                client.send_message("/VMC/Ext/Bone/Pos", ["RightLowerArm", 0.0, 0.0, 0.0, float(q_rl[0]), float(q_rl[1]), float(q_rl[2]), float(q_rl[3])])
+                bf = bone_quat_filters['RightLowerArm']
+                q_rl_s = [bf[i](curr_time, q_rl[i]) for i in range(4)]
+                norm = np.linalg.norm(q_rl_s)
+                if norm > 1e-6: q_rl_s = [x / norm for x in q_rl_s]
+                client.send_message("/VMC/Ext/Bone/Pos", ["RightLowerArm", 0.0, 0.0, 0.0, float(q_rl_s[0]), float(q_rl_s[1]), float(q_rl_s[2]), float(q_rl_s[3])])
+
+        # --- LEG TRACKING (Added): Upper/Lower leg bones with smoothing ---
+        if lm[23].visibility > 0.5 and lm[25].visibility > 0.5:
+            start = to_unity_vec(get_vec(23))
+            end = to_unity_vec(get_vec(25))
+            q_lul = get_limb_rotation(start, end, [0.0, -1.0, 0.0])
+            bf = bone_quat_filters['LeftUpperLeg']
+            q_lul_s = [bf[i](curr_time, q_lul[i]) for i in range(4)]
+            norm = np.linalg.norm(q_lul_s)
+            if norm > 1e-6: q_lul_s = [x / norm for x in q_lul_s]
+            client.send_message("/VMC/Ext/Bone/Pos", ["LeftUpperLeg", 0.0, 0.0, 0.0, float(q_lul_s[0]), float(q_lul_s[1]), float(q_lul_s[2]), float(q_lul_s[3])])
+            if lm[27].visibility > 0.5:
+                start = to_unity_vec(get_vec(25))
+                end = to_unity_vec(get_vec(27))
+                q_lll = get_limb_rotation(start, end, [0.0, -1.0, 0.0])
+                bf = bone_quat_filters['LeftLowerLeg']
+                q_lll_s = [bf[i](curr_time, q_lll[i]) for i in range(4)]
+                norm = np.linalg.norm(q_lll_s)
+                if norm > 1e-6: q_lll_s = [x / norm for x in q_lll_s]
+                client.send_message("/VMC/Ext/Bone/Pos", ["LeftLowerLeg", 0.0, 0.0, 0.0, float(q_lll_s[0]), float(q_lll_s[1]), float(q_lll_s[2]), float(q_lll_s[3])])
+
+        if lm[24].visibility > 0.5 and lm[26].visibility > 0.5:
+            start = to_unity_vec(get_vec(24))
+            end = to_unity_vec(get_vec(26))
+            q_rul = get_limb_rotation(start, end, [0.0, -1.0, 0.0])
+            bf = bone_quat_filters['RightUpperLeg']
+            q_rul_s = [bf[i](curr_time, q_rul[i]) for i in range(4)]
+            norm = np.linalg.norm(q_rul_s)
+            if norm > 1e-6: q_rul_s = [x / norm for x in q_rul_s]
+            client.send_message("/VMC/Ext/Bone/Pos", ["RightUpperLeg", 0.0, 0.0, 0.0, float(q_rul_s[0]), float(q_rul_s[1]), float(q_rul_s[2]), float(q_rul_s[3])])
+            if lm[28].visibility > 0.5:
+                start = to_unity_vec(get_vec(26))
+                end = to_unity_vec(get_vec(28))
+                q_rll = get_limb_rotation(start, end, [0.0, -1.0, 0.0])
+                bf = bone_quat_filters['RightLowerLeg']
+                q_rll_s = [bf[i](curr_time, q_rll[i]) for i in range(4)]
+                norm = np.linalg.norm(q_rll_s)
+                if norm > 1e-6: q_rll_s = [x / norm for x in q_rll_s]
+                client.send_message("/VMC/Ext/Bone/Pos", ["RightLowerLeg", 0.0, 0.0, 0.0, float(q_rll_s[0]), float(q_rll_s[1]), float(q_rll_s[2]), float(q_rll_s[3])])
 
     # 3. FINGER TRACKING
     if results.left_hand_landmarks:
